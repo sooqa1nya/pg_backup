@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -64,7 +64,7 @@ ui_spin_start() {
     _UI_SPIN_ON=1
     log_write "INFO" "$msg"
     if ! _ui_interactive; then
-        echo -e "${GRAY}[INFO]${RESET} $msg"
+        echo -e "${GRAY}[INFO]${RESET}$msg"
         return 0
     fi
     (
@@ -100,7 +100,7 @@ _LOG_ROTATED=false
 _log_rotate() {
     local f
     for f in backup restore error system; do
-        if [[ -f "${LOG_DIR}/${f}.log" && $(stat -c %s "${LOG_DIR}/${f}.log" 2>/dev/null || echo 0) -gt $LOG_MAX_BYTES ]]; then
+        if [[ -f "${LOG_DIR}/${f}.log" && $(stat -c \%s "${LOG_DIR}/${f}.log" 2>/dev/null \vert{}\vert{} echo 0) -gt $LOG_MAX_BYTES ]]; then
             mv -f "${LOG_DIR}/${f}.log" "${LOG_DIR}/${f}.log.1" 2>/dev/null || true
         fi
     done
@@ -116,9 +116,9 @@ log_write() {
         chmod 700 "$LOG_DIR" 2>/dev/null || true
         [[ "$_LOG_ROTATED" != "true" ]] && _log_rotate
         local clean
-        clean=$(printf '%s' "$message" | sed -e $'s/\x1b\\[[0-9;]*m//g' -e 's/bot[0-9]\{6,\}:[A-Za-z0-9_-]\{20,\}/bot***/g' | tr '\n' ' ')
-        echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] ${clean}" >> "${LOG_DIR}/${LOG_CATEGORY}.log"
-        if [[ "$level" == "ERROR" || "$level" == "WARN" ]]; then
+        clean=$(printf '%s' "$message" \vert{} sed -e $'s/\x1b\\[[0-9;]*m//g' -e 's/bot[0-9]\{6,\}:[A-Za-z0-9_-]\{20,\}/bot***/g' | tr '\n' ' ')
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}]${clean}" >> "${LOG_DIR}/${LOG_CATEGORY}.log"
+        if [[ "$level" == "ERROR" \vert{}\vert{} "$level" == "WARN" ]]; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] [${LOG_CATEGORY}] ${clean}" >> "${LOG_DIR}/error.log"
         fi
     ) 2>/dev/null || true
@@ -140,11 +140,11 @@ print_message() {
     [[ "$_UI_SPIN_ON" == "1" ]] && ui_spin_stop
     if [[ -n "$UI_LAST_ELAPSED" ]]; then
         if [[ "$type" == "SUCCESS" && "$UI_LAST_ELAPSED" -ge 2 ]]; then
-            message="${message} ${LIGHT_GRAY}· ${UI_LAST_ELAPSED}с${RESET}"
+            message="${message}${LIGHT_GRAY}· ${UI_LAST_ELAPSED}с${RESET}"
         fi
         UI_LAST_ELAPSED=""
     fi
-    echo -e "${color_code}[${type}]${RESET} ${message}"
+    echo -e "${color_code}[${type}]${RESET}${message}"
     log_write "$type" "$message"
 }
 
@@ -427,6 +427,17 @@ _ui_strip() {
     sed $'s/\x1b\\[[0-9;]*m//g' <<< "$1"
 }
 
+_human_size() {
+    LC_ALL=C awk -v b="${1:-0}" 'BEGIN {
+        split("Б КБ МБ ГБ ТБ", u, " ")
+        i = 1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        s = (i == 1) ? sprintf("%d %s", b, u[i]) : sprintf("%.1f %s", b, u[i])
+        sub(/\.0 /, " ", s)
+        print s
+    }'
+}
+
 _ui_status_card() {
     local LC_ALL=C.UTF-8
     local title="$1"; shift
@@ -448,20 +459,20 @@ _ui_status_card() {
         echo ""
         for ((i = 1; i <= $#; i += 2)); do
             j=$((i + 1)); label="${!i}"
-            echo -e "  ${LIGHT_GRAY}${label}${RESET}$(printf '%*s' $((lw - ${#label} + 3)) '')${!j}${RESET}"
+            echo -e "  ${LIGHT_GRAY}${label}${RESET}$(printf '%*s' $((lw -${#label} + 3)) '')${!j}${RESET}"
         done
         return 0
     fi
 
     for ((i = 0; i < inner + 4; i++)); do hr+="─"; done
     echo -e "${GREEN}╭${hr}╮${RESET}"
-    echo -e "${GREEN}│${RESET}  ${title}${RESET}$(printf '%*s' $((inner - ${#title_plain} + 2)) '')${GREEN}│${RESET}"
+    echo -e "${GREEN}│${RESET}${title}${RESET}$(printf '%*s' $((inner -${#title_plain} + 2)) '')${GREEN}│${RESET}"
     echo -e "${GREEN}├${hr}┤${RESET}"
     for ((i = 1; i <= $#; i += 2)); do
         j=$((i + 1)); label="${!i}"
         plain=$(_ui_strip "${!j}")
-        pad=$(( inner - lw - 3 - ${#plain} + 2 ))
-        echo -e "${GREEN}│${RESET}  ${LIGHT_GRAY}${label}${RESET}$(printf '%*s' $((lw - ${#label} + 3)) '')${!j}${RESET}$(printf '%*s' "$pad" '')${GREEN}│${RESET}"
+        pad=$(( inner - lw - 3 -${#plain} + 2 ))
+        echo -e "${GREEN}│${RESET}  ${LIGHT_GRAY}${label}${RESET}$(printf '%*s' $((lw -${#label} + 3)) '')${!j}${RESET}$(printf '%*s' "$pad" '')${GREEN}│${RESET}"
     done
     echo -e "${GREEN}╰${hr}╯${RESET}"
 }
@@ -896,538 +907,4 @@ restore_backup() {
     esac
 
     if [[ "$selected_file" == *.gz ]] && ! gzip -t "$selected_file" 2>/dev/null; then
-        print_message "ERROR" "Архив повреждён или не является корректным gzip-файлом."
-        _release_run_lock
-        return 1
-    fi
-
-    echo ""
-    print_message "WARN" "Файл: ${BOLD}${selected_file}${RESET}"
-    print_message "WARN" "Текущие данные в базе ${BOLD}${DB_NAME}${RESET} будут перезаписаны!"
-    local confirm
-    ui_confirm confirm "Выполнить восстановление?"
-    echo ""
-
-    if [[ "$confirm" != "y" ]]; then
-        print_message "INFO" "Восстановление отменено."
-        _release_run_lock
-        return 0
-    fi
-
-    local err_log rc=0
-    err_log=$(mktemp)
-    ui_spin_start "Восстанавливаю базу ${DB_NAME}..."
-
-    if [[ "$selected_file" == *.gz ]]; then
-        ( set -o pipefail; gunzip -c "$selected_file" | docker exec -i "$DOCKER_CONTAINER" psql -q -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>"$err_log" ) || rc=$?
-    else
-        docker exec -i "$DOCKER_CONTAINER" psql -q -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>"$err_log" < "$selected_file" || rc=$?
-    fi
-
-    if [[ $rc -eq 0 ]]; then
-        print_message "SUCCESS" "База ${BOLD}${DB_NAME}${RESET} успешно восстановлена!"
-        if [[ -s "$err_log" ]]; then
-            print_message "WARN" "Предупреждения psql (первые 5 строк):"
-            head -n 5 "$err_log"
-        fi
-        send_telegram_message "✅ <b>Восстановление БД ${DB_NAME} завершено</b>\nФайл: <code>${selected_file##*/}</code>" || true
-    else
-        print_message "ERROR" "Ошибка при восстановлении (код ${rc}):"
-        head -n 10 "$err_log"
-        log_write "ERROR" "Restore failed (rc=${rc}): $(head -n 5 "$err_log" | tr '\n' ' ')"
-    fi
-
-    rm -f "$err_log"
-    _release_run_lock
-    return $rc
-}
-
-# ============== ОБНОВЛЕНИЕ СКРИПТА ==============
-_version_lt() {
-    [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
-}
-
-update_script() {
-    LOG_CATEGORY="system"
-    clear
-    echo -e "${GREEN}${BOLD}Обновление скрипта${RESET}"
-    echo ""
-
-    if [[ "$EUID" -ne 0 ]]; then
-        print_message "ERROR" "Для обновления требуются права root."
-        return 1
-    fi
-
-    ui_spin_start "Проверяю последнюю версию на GitHub..."
-    local remote_ver
-    remote_ver=$(curl -fsSL --max-time 15 "$SCRIPT_REPO_URL" 2>/dev/null | grep -m 1 '^VERSION=' | cut -d'"' -f2)
-
-    if [[ -z "$remote_ver" ]]; then
-        print_message "ERROR" "Не удалось получить информацию о версии с GitHub."
-        return 1
-    fi
-
-    print_message "INFO" "Текущая версия:   ${BOLD}${VERSION}${RESET}"
-    print_message "INFO" "Версия на GitHub: ${BOLD}${GREEN}${remote_ver}${RESET}"
-    echo ""
-
-    local confirm="n"
-    if _version_lt "$VERSION" "$remote_ver"; then
-        ui_confirm confirm "Доступно обновление до v${remote_ver}. Установить?"
-    else
-        print_message "SUCCESS" "У вас установлена актуальная версия."
-        ui_confirm confirm "Принудительно переустановить с GitHub?"
-    fi
-
-    [[ "$confirm" != "y" ]] && { print_message "INFO" "Обновление отменено."; return 0; }
-
-    local tmp_script="${SCRIPT_PATH}.tmp"
-    ui_spin_start "Загружаю новую версию..."
-    if ! curl -fsSL --max-time 30 "$SCRIPT_REPO_URL" -o "$tmp_script"; then
-        rm -f "$tmp_script"
-        print_message "ERROR" "Ошибка загрузки файла с GitHub."
-        return 1
-    fi
-
-    if [[ ! -s "$tmp_script" ]] || ! head -n 1 "$tmp_script" | grep -qE '^#!.*bash'; then
-        rm -f "$tmp_script"
-        print_message "ERROR" "Загруженный файл повреждён или не является bash-скриптом."
-        return 1
-    fi
-
-    cp -f "$SCRIPT_PATH" "${SCRIPT_PATH}.bak" 2>/dev/null || true
-    mv -f "$tmp_script" "$SCRIPT_PATH"
-    chmod +x "$SCRIPT_PATH"
-    setup_symlink
-
-    print_message "SUCCESS" "Скрипт обновлён до v${remote_ver}! Конфигурация сохранена."
-    echo ""
-    if _ui_interactive; then
-        read -rp "Нажмите Enter для перезапуска..."
-        exec "$SCRIPT_PATH"
-    fi
-}
-
-# ============== КАРТОЧКА СТАТУСА ==============
-show_status_card() {
-    local title="${GREEN}${BOLD}PostgreSQL Backup${RESET}  ${LIGHT_GRAY}v${VERSION}${RESET}"
-    local db_val="${BOLD}${DOCKER_CONTAINER}${RESET} · ${DB_USER}/${DB_NAME}"
-    local tg_val sched_val next_val retain_val last_val local_count
-
-    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-        local tail="${TELEGRAM_BOT_TOKEN#*:}"
-        tg_val="${GREEN}Настроен${RESET} ${LIGHT_GRAY}(${TELEGRAM_CHAT_ID}, ***${tail: -4})${RESET}"
-    else
-        tg_val="${RED}Не настроен${RESET}"
-    fi
-
-    if [[ "$SCHEDULE_MODE" == "off" ]]; then
-        sched_val="${LIGHT_GRAY}Отключено${RESET}"
-    elif is_timer_active; then
-        if [[ "$SCHEDULE_MODE" == "interval" ]]; then
-            sched_val="${GREEN}Активно${RESET} · каждые ${BOLD}${SCHEDULE_HOURS} ч.${RESET}"
-        else
-            sched_val="${GREEN}Активно${RESET} · в ${BOLD}${SCHEDULE_TIMES}${RESET}"
-        fi
-    else
-        if [[ "$SCHEDULE_MODE" == "interval" ]]; then
-            sched_val="${YELLOW}На паузе${RESET} ${LIGHT_GRAY}(каждые ${SCHEDULE_HOURS} ч.)${RESET}"
-        else
-            sched_val="${YELLOW}На паузе${RESET} ${LIGHT_GRAY}(${SCHEDULE_TIMES})${RESET}"
-        fi
-    fi
-
-    if is_timer_active; then
-        next_val=$(systemctl show -p NextElapseUSecRealtime --value "${SERVICE_NAME}.timer" 2>/dev/null)
-        next_val="${BOLD}${next_val:-вычисляется...}${RESET}"
-    else
-        next_val="${LIGHT_GRAY}—${RESET}"
-    fi
-
-    local_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sql.gz" 2>/dev/null | wc -l)
-    if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
-        retain_val="${LIGHT_GRAY}Удалять сразу${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
-    else
-        retain_val="${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
-    fi
-
-    if [[ -f "$LAST_BACKUP_FILE" ]]; then
-        local lb_date lb_size lb_st
-        IFS='|' read -r lb_date lb_size lb_st < "$LAST_BACKUP_FILE"
-        case "$lb_st" in
-            ok)     last_val="${GREEN}✓${RESET} ${lb_date} · ${BOLD}${lb_size}${RESET}" ;;
-            tg_err) last_val="${YELLOW}⚠ Ошибка TG${RESET} (${lb_date}, локально)" ;;
-            *)      last_val="${RED}✗ Ошибка${RESET} (${lb_date})" ;;
-        esac
-    else
-        last_val="${LIGHT_GRAY}Ещё не выполнялся${RESET}"
-    fi
-
-    _ui_status_card "$title" \
-        "База данных"  "$db_val" \
-        "Telegram"     "$tg_val" \
-        "Расписание"   "$sched_val" \
-        "След. запуск" "$next_val" \
-        "Хранение"     "$retain_val" \
-        "Последний"    "$last_val"
-}
-
-# ============== ПОДМЕНЮ НАСТРОЕК ==============
-menu_schedule() {
-    local choice
-    while true; do
-        clear
-        echo -e "${GREEN}${BOLD}Расписание и хранение копий${RESET}"
-        echo ""
-        if [[ "$SCHEDULE_MODE" == "interval" ]]; then
-            print_message "INFO" "Расписание: ${BOLD}интервал каждые ${SCHEDULE_HOURS} ч.${RESET}"
-        elif [[ "$SCHEDULE_MODE" == "time" ]]; then
-            print_message "INFO" "Расписание: ${BOLD}по времени (${SCHEDULE_TIMES})${RESET}"
-        else
-            print_message "INFO" "Расписание: ${YELLOW}отключено${RESET}"
-        fi
-        if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
-            print_message "INFO" "Хранение на сервере: ${YELLOW}удалять сразу после отправки в Telegram${RESET}"
-        else
-            print_message "INFO" "Хранение на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} (${BACKUP_DIR})"
-        fi
-        echo ""
-
-        ui_menu_reset
-        ui_menu_add 1 "Задать интервал в часах (ручной ввод)"
-        ui_menu_add 2 "Задать точное время запуска (ЧЧ:ММ)"
-        if is_timer_active; then
-            ui_menu_add 3 "Приостановить расписание" warn
-        elif [[ "$SCHEDULE_MODE" != "off" ]]; then
-            ui_menu_add 3 "Возобновить расписание" primary
-        fi
-        ui_menu_add 4 "Полностью отключить расписание" danger
-        ui_menu_gap
-        ui_menu_add 5 "Изменить срок хранения на сервере (дней)"
-        ui_menu_gap
-        ui_menu_add 0 "Назад"
-        ui_menu_choose choice
-        echo ""
-
-        case "$choice" in
-            1)
-                local hours
-                ui_input hours "Интервал в часах" "$SCHEDULE_HOURS" "Целое число, например: 6, 12, 24"
-                if [[ "$hours" =~ ^[0-9]+$ && "$hours" -gt 0 ]]; then
-                    SCHEDULE_MODE="interval"
-                    SCHEDULE_HOURS="$hours"
-                    SCHEDULE_PAUSED="false"
-                    save_config
-                    apply_systemd_schedule
-                    print_message "SUCCESS" "Установлен интервал: каждые ${BOLD}${hours} ч.${RESET}"
-                else
-                    print_message "ERROR" "Введите целое положительное число."
-                fi
-                ;;
-            2)
-                local times t valid=true
-                ui_input times "Время запуска (ЧЧ:ММ через пробел)" "$SCHEDULE_TIMES" "По времени сервера ($(date +%Z)). Пример: 03:00 или 03:00 15:00"
-                [[ -z "$times" ]] && continue
-                for t in $times; do
-                    if ! [[ "$t" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-                        print_message "ERROR" "Неверный формат времени: ${t} (нужно ЧЧ:ММ, например 03:00)"
-                        valid=false; break
-                    fi
-                done
-                if [[ "$valid" == "true" ]]; then
-                    SCHEDULE_MODE="time"
-                    SCHEDULE_TIMES="$times"
-                    SCHEDULE_PAUSED="false"
-                    save_config
-                    apply_systemd_schedule
-                    print_message "SUCCESS" "Установлено расписание на: ${BOLD}${times}${RESET}"
-                fi
-                ;;
-            3)
-                if is_timer_active; then pause_schedule; else resume_schedule; fi
-                ;;
-            4)
-                SCHEDULE_MODE="off"
-                SCHEDULE_PAUSED="true"
-                save_config
-                apply_systemd_schedule
-                print_message "SUCCESS" "Расписание отключено."
-                ;;
-            5)
-                local days
-                ui_input days "Сколько дней хранить локальные копии" "$LOCAL_RETAIN_DAYS" "0 — удалять сразу после отправки в Telegram"
-                if [[ "$days" =~ ^[0-9]+$ ]]; then
-                    LOCAL_RETAIN_DAYS="$((10#$days))"
-                    save_config
-                    if (( LOCAL_RETAIN_DAYS == 0 )); then
-                        print_message "SUCCESS" "Локальное хранение отключено (архивы будут удаляться после отправки)."
-                    else
-                        print_message "SUCCESS" "Срок хранения на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET}"
-                    fi
-                else
-                    print_message "ERROR" "Введите целое число (0 или больше)."
-                fi
-                ;;
-            0) return ;;
-        esac
-        echo ""
-        read -rp "Нажмите Enter..."
-    done
-}
-
-menu_database() {
-    local choice
-    while true; do
-        clear
-        echo -e "${GREEN}${BOLD}Настройка Docker и PostgreSQL${RESET}"
-        echo ""
-        print_message "INFO" "Контейнер:    ${BOLD}${DOCKER_CONTAINER}${RESET}"
-        print_message "INFO" "Пользователь: ${BOLD}${DB_USER}${RESET}"
-        print_message "INFO" "База данных:  ${BOLD}${DB_NAME}${RESET}"
-        echo ""
-
-        ui_menu_reset
-        ui_menu_add 1 "Изменить Docker-контейнер"
-        ui_menu_add 2 "Изменить DB_USER"
-        ui_menu_add 3 "Изменить DB_NAME"
-        ui_menu_add 4 "Проверить подключение к БД"
-        ui_menu_gap
-        ui_menu_add 0 "Назад"
-        ui_menu_choose choice
-        echo ""
-
-        case "$choice" in
-            1)
-                local val
-                ui_input val "Имя Docker-контейнера" "$DOCKER_CONTAINER"
-                if [[ -n "$val" ]]; then
-                    DOCKER_CONTAINER="$val"; save_config
-                    print_message "SUCCESS" "Контейнер обновлён: ${BOLD}${DOCKER_CONTAINER}${RESET}"
-                fi
-                ;;
-            2)
-                local val
-                ui_input val "Пользователь БД (DB_USER)" "$DB_USER"
-                if [[ -n "$val" ]]; then
-                    DB_USER="$val"; save_config
-                    print_message "SUCCESS" "DB_USER обновлён: ${BOLD}${DB_USER}${RESET}"
-                fi
-                ;;
-            3)
-                local val
-                ui_input val "Имя базы данных (DB_NAME)" "$DB_NAME"
-                if [[ -n "$val" ]]; then
-                    DB_NAME="$val"; save_config
-                    print_message "SUCCESS" "DB_NAME обновлён: ${BOLD}${DB_NAME}${RESET}"
-                fi
-                ;;
-            4)
-                ui_spin_start "Проверяю доступность ${DOCKER_CONTAINER}..."
-                if docker exec "$DOCKER_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; then
-                    print_message "SUCCESS" "Подключение к ${DB_NAME} успешно!"
-                else
-                    print_message "ERROR" "Не удалось подключиться к контейнеру/БД."
-                fi
-                ;;
-            0) return ;;
-        esac
-        echo ""
-        read -rp "Нажмите Enter..."
-    done
-}
-
-menu_telegram() {
-    local choice
-    while true; do
-        clear
-        echo -e "${GREEN}${BOLD}Настройка Telegram${RESET}"
-        echo ""
-        local masked="не задан"
-        if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
-            local tail="${TELEGRAM_BOT_TOKEN#*:}"
-            masked="${TELEGRAM_BOT_TOKEN%%:*}:****${tail: -4}"
-        fi
-        print_message "INFO" "Токен бота: ${BOLD}${masked}${RESET}"
-        print_message "INFO" "Chat ID:    ${BOLD}${TELEGRAM_CHAT_ID:-не задан}${RESET}"
-        echo ""
-
-        ui_menu_reset
-        ui_menu_add 1 "Изменить токен бота"
-        ui_menu_add 2 "Изменить Chat ID"
-        ui_menu_add 3 "Отправить тестовое сообщение"
-        ui_menu_gap
-        ui_menu_add 0 "Назад"
-        ui_menu_choose choice
-        echo ""
-
-        case "$choice" in
-            1)
-                local tok
-                ui_secret tok "Новый токен Telegram-бота" "Ввод скрыт"
-                if [[ -n "$tok" ]]; then
-                    TELEGRAM_BOT_TOKEN="$tok"; save_config
-                    print_message "SUCCESS" "Токен сохранён."
-                fi
-                ;;
-            2)
-                local cid
-                ui_input cid "Новый Chat ID" "$TELEGRAM_CHAT_ID"
-                if [[ -n "$cid" ]]; then
-                    TELEGRAM_CHAT_ID="$cid"; save_config
-                    print_message "SUCCESS" "Chat ID сохранён: ${BOLD}${TELEGRAM_CHAT_ID}${RESET}"
-                fi
-                ;;
-            3)
-                ui_spin_start "Отправляю тест в Telegram..."
-                if send_telegram_message "✅ <b>Тестовое сообщение</b>\nБот настроен корректно (<code>${DOCKER_CONTAINER}/${DB_NAME}</code>)."; then
-                    print_message "SUCCESS" "Сообщение доставлено!"
-                else
-                    print_message "ERROR" "Ошибка отправки. Проверьте токен, Chat ID и логи."
-                fi
-                ;;
-            0) return ;;
-        esac
-        echo ""
-        read -rp "Нажмите Enter..."
-    done
-}
-
-menu_logs() {
-    local choice
-    while true; do
-        clear
-        echo -e "${GREEN}${BOLD}Просмотр логов${RESET}"
-        echo ""
-        ui_menu_reset
-        ui_menu_add 1 "Лог бэкапов (backup.log)"
-        ui_menu_add 2 "Лог восстановлений (restore.log)"
-        ui_menu_add 3 "Лог ошибок (error.log)"
-        ui_menu_add 4 "Журнал systemd (journalctl)"
-        ui_menu_gap
-        ui_menu_add 0 "Назад"
-        ui_menu_choose choice
-        echo ""
-
-        clear
-        case "$choice" in
-            1)
-                echo -e "${GREEN}${BOLD}${LOG_DIR}/backup.log${RESET}\n"
-                if [[ -s "${LOG_DIR}/backup.log" ]]; then tail -n 50 "${LOG_DIR}/backup.log"; else print_message "INFO" "Лог пока пуст."; fi
-                ;;
-            2)
-                echo -e "${GREEN}${BOLD}${LOG_DIR}/restore.log${RESET}\n"
-                if [[ -s "${LOG_DIR}/restore.log" ]]; then tail -n 50 "${LOG_DIR}/restore.log"; else print_message "INFO" "Лог пока пуст."; fi
-                ;;
-            3)
-                echo -e "${GREEN}${BOLD}${LOG_DIR}/error.log${RESET}\n"
-                if [[ -s "${LOG_DIR}/error.log" ]]; then tail -n 50 "${LOG_DIR}/error.log"; else print_message "INFO" "Ошибок не зафиксировано."; fi
-                ;;
-            4)
-                echo -e "${GREEN}${BOLD}journalctl -u ${SERVICE_NAME}.service${RESET}\n"
-                journalctl -u "${SERVICE_NAME}.service" -n 40 --no-pager 2>/dev/null || print_message "INFO" "Записей нет."
-                ;;
-            0) return ;;
-        esac
-        echo ""
-        read -rp "Нажмите Enter..."
-    done
-}
-
-uninstall_all() {
-    local ans
-    print_message "WARN" "Будут удалены: systemd сервис/таймер, симлинк ${SYMLINK_PATH} и папка ${INSTALL_DIR}."
-    ui_confirm ans "Точно удалить?"
-    [[ "$ans" != "y" ]] && return
-
-    systemctl disable --now "${SERVICE_NAME}.timer" 2>/dev/null || true
-    systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.timer"
-    systemctl daemon-reload
-    rm -f "$SYMLINK_PATH"
-    rm -rf "$INSTALL_DIR"
-    print_message "SUCCESS" "Скрипт и systemd-таймер полностью удалены."
-    exit 0
-}
-
-# ============== ГЛАВНОЕ МЕНЮ ==============
-main_menu() {
-    local choice=""
-    while true; do
-        LOG_CATEGORY="system"
-        clear
-        show_status_card
-        echo ""
-
-        ui_menu_reset
-        ui_menu_add 1 "Сделать моментальный бэкап" primary
-        ui_menu_add 2 "Восстановить БД из бэкапа" primary
-        if is_timer_active; then
-            ui_menu_add 3 "Приостановить авто-бэкапы" warn
-        else
-            ui_menu_add 3 "Возобновить авто-бэкапы" primary
-        fi
-        ui_menu_gap
-        ui_menu_add 4 "Расписание и хранение (время / интервал / дни)"
-        ui_menu_add 5 "База данных и Docker-контейнер"
-        ui_menu_add 6 "Настройки Telegram (токен и чат)"
-        ui_menu_add 7 "Логи"
-        ui_menu_gap
-        ui_menu_add 8 "Обновить скрипт" warn
-        ui_menu_add 9 "Удалить скрипт и таймер" danger
-        ui_menu_gap
-        ui_menu_add 0 "Выход"
-        ui_menu_footer "Команды: pg-backup [backup|restore|update|pause|resume|status]"
-        ui_menu_choose choice "$choice"
-        echo ""
-
-        case "$choice" in
-            1) ( do_backup ) || true; echo ""; read -rp "Нажмите Enter..." ;;
-            2) ( restore_backup ) || true; echo ""; read -rp "Нажмите Enter..." ;;
-            3)
-                if is_timer_active; then pause_schedule; else resume_schedule; fi
-                echo ""; read -rp "Нажмите Enter..."
-                ;;
-            4) menu_schedule ;;
-            5) menu_database ;;
-            6) menu_telegram ;;
-            7) menu_logs ;;
-            8) update_script; echo ""; read -rp "Нажмите Enter..." ;;
-            9) uninstall_all ;;
-            0) exit 0 ;;
-        esac
-    done
-}
-
-# ============== ТОЧКА ВХОДА ==============
-load_or_init "$@"
-
-case "${1:-}" in
-    "")
-        main_menu
-        ;;
-    backup)
-        do_backup
-        ;;
-    restore)
-        restore_backup
-        ;;
-    update)
-        update_script
-        ;;
-    pause)
-        pause_schedule
-        ;;
-    resume)
-        resume_schedule
-        ;;
-    status)
-        show_status_card
-        ;;
-    uninstall)
-        uninstall_all
-        ;;
-    *)
-        echo "Использование: pg-backup [backup|restore|update|pause|resume|status|uninstall]"
-        exit 1
-        ;;
-esac
+        print_message "ERROR" "Архив повреждён или не
