@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -453,7 +453,7 @@ _disk_usage_tg_line() {
     [[ -n "$d_total" && "$d_total" -gt 0 ]] || return 0
     d_pct=$(( d_used * 100 / d_total ))
     (( d_pct >= 90 )) && icon="⚠️"
-    printf '\\n%s Диск: %s / %s (%d%%) · свободно %s' \
+    printf '\\n%s %s / %s (%d%%) · свободно %s' \
         "$icon" "$(_ui_human_size "$d_used")" "$(_ui_human_size "$d_total")" "$d_pct" "$(_ui_human_size "$d_avail")"
 }
 
