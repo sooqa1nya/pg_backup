@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# pg-backup.sh — Резервное копирование PostgreSQL (Docker) в Telegram
-# Использование: pg-backup [backup|pause|resume|status|uninstall]
+# pg-backup.sh — Резервное копирование и восстановление PostgreSQL (Docker) с отправкой в Telegram
+# Использование: pg-backup [backup|restore|update|pause|resume|status|uninstall]
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+VERSION="1.2.0"
+SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
 SCRIPT_NAME="pg-backup.sh"
@@ -21,13 +24,14 @@ SCRIPT_RUN_PATH="$(readlink -f "$0")"
 # Значения по умолчанию
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
-DOCKER_CONTAINER="vpn-postgres"
-DB_USER="sooqa"
-DB_NAME="rwvpn"
+DOCKER_CONTAINER="postgres"
+DB_USER="postgres"
+DB_NAME="postgres"
 SCHEDULE_MODE="time"      # time | interval | off
 SCHEDULE_TIMES="03:00"    # время через пробел, например: 03:00 15:00
 SCHEDULE_HOURS="24"       # интервал в часах
 SCHEDULE_PAUSED="false"
+LOCAL_RETAIN_DAYS="7"     # сколько дней хранить бэкапы на сервере (0 — удалять сразу после отправки)
 
 # ============== ЦВЕТА И TUI ==============
 if [[ -t 0 && -t 1 ]]; then
@@ -95,7 +99,7 @@ _LOG_ROTATED=false
 
 _log_rotate() {
     local f
-    for f in backup error system; do
+    for f in backup restore error system; do
         if [[ -f "${LOG_DIR}/${f}.log" && $(stat -c %s "${LOG_DIR}/${f}.log" 2>/dev/null || echo 0) -gt $LOG_MAX_BYTES ]]; then
             mv -f "${LOG_DIR}/${f}.log" "${LOG_DIR}/${f}.log.1" 2>/dev/null || true
         fi
@@ -498,6 +502,7 @@ SCHEDULE_MODE="${SCHEDULE_MODE}"
 SCHEDULE_TIMES="${SCHEDULE_TIMES}"
 SCHEDULE_HOURS="${SCHEDULE_HOURS}"
 SCHEDULE_PAUSED="${SCHEDULE_PAUSED}"
+LOCAL_RETAIN_DAYS="${LOCAL_RETAIN_DAYS}"
 EOF
     chmod 600 "$CONFIG_FILE"
 }
@@ -512,21 +517,29 @@ setup_symlink() {
 
 first_run_wizard() {
     clear
-    echo -e "${GREEN}${BOLD}Первичная настройка PostgreSQL Backup${RESET}"
+    echo -e "${GREEN}${BOLD}Первичная настройка PostgreSQL Backup v${VERSION}${RESET}"
     echo ""
 
     ui_secret TELEGRAM_BOT_TOKEN "Токен Telegram-бота" "Получить у @BotFather"
     echo ""
     ui_input TELEGRAM_CHAT_ID "Chat ID для отправки бэкапов" "-1001234567890" "ID личного чата или группы"
     echo ""
-    ui_input input_container "Имя Docker-контейнера PostgreSQL" "$DOCKER_CONTAINER" "Enter — оставить ${DOCKER_CONTAINER}"
-    [[ -n "$input_container" ]] && DOCKER_CONTAINER="$input_container"
+    local input_container input_user input_db input_retain
+    ui_input input_container "Имя Docker-контейнера PostgreSQL" "postgres" "Enter — оставить postgres"
+    DOCKER_CONTAINER="${input_container:-postgres}"
     echo ""
-    ui_input input_user "Пользователь БД (DB_USER)" "$DB_USER" "Enter — оставить ${DB_USER}"
-    [[ -n "$input_user" ]] && DB_USER="$input_user"
+    ui_input input_user "Пользователь БД (DB_USER)" "postgres" "Enter — оставить postgres"
+    DB_USER="${input_user:-postgres}"
     echo ""
-    ui_input input_db "Имя базы данных (DB_NAME)" "$DB_NAME" "Enter — оставить ${DB_NAME}"
-    [[ -n "$input_db" ]] && DB_NAME="$input_db"
+    ui_input input_db "Имя базы данных (DB_NAME)" "postgres" "Enter — оставить postgres"
+    DB_NAME="${input_db:-postgres}"
+    echo ""
+    ui_input input_retain "Хранить локальные копии на сервере (дней)" "7" "Enter — 7 дней; 0 — удалять сразу после отправки"
+    if [[ "$input_retain" =~ ^[0-9]+$ ]]; then
+        LOCAL_RETAIN_DAYS="$input_retain"
+    else
+        LOCAL_RETAIN_DAYS="7"
+    fi
     echo ""
 
     print_message "ACTION" "Выберите режим расписания:"
@@ -540,12 +553,14 @@ first_run_wizard() {
 
     case "$sched_choice" in
         1)
+            local input_times
             SCHEDULE_MODE="time"
             ui_input input_times "Время запуска (ЧЧ:ММ через пробел)" "03:00" "Например: 03:00 или 03:00 15:00"
             SCHEDULE_TIMES="${input_times:-03:00}"
             SCHEDULE_PAUSED="false"
             ;;
         2)
+            local input_hours
             SCHEDULE_MODE="interval"
             ui_input input_hours "Интервал в часах" "24" "Целое число больше 0"
             SCHEDULE_HOURS="${input_hours:-24}"
@@ -579,6 +594,7 @@ load_or_init() {
     if [[ -f "$CONFIG_FILE" ]]; then
         # shellcheck disable=SC1090
         source "$CONFIG_FILE"
+        LOCAL_RETAIN_DAYS="${LOCAL_RETAIN_DAYS:-7}"
     else
         first_run_wizard
     fi
@@ -658,7 +674,7 @@ pause_schedule() {
 
 resume_schedule() {
     if [[ "$SCHEDULE_MODE" == "off" ]]; then
-        print_message "WARN" "Сначала задайте расписание в пункте «Настройка расписания»."
+        print_message "WARN" "Сначала задайте расписание в пункте «Расписание и хранение»."
         return 1
     fi
     SCHEDULE_PAUSED="false"
@@ -714,11 +730,24 @@ send_telegram_file() {
     return 1
 }
 
+# ============== РОТАЦИЯ ЛОКАЛЬНЫХ КОПИЙ ==============
+cleanup_old_backups() {
+    local retain="${LOCAL_RETAIN_DAYS:-7}"
+    [[ "$retain" =~ ^[0-9]+$ ]] || return 0
+    (( retain <= 0 )) && return 0
+
+    local deleted
+    deleted=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sql.gz" -mmin +"$((retain * 1440))" -print -delete 2>/dev/null | wc -l)
+    if (( deleted > 0 )); then
+        print_message "INFO" "Удалено старых локальных копий: ${deleted} (старше ${retain} дн.)"
+    fi
+}
+
 # ============== ЛОГИКА БЭКАПА ==============
 do_backup() {
     LOG_CATEGORY="backup"
     if ! _take_run_lock; then
-        print_message "WARN" "Другой процесс бэкапа уже выполняется, запуск пропущен."
+        print_message "WARN" "Другой процесс бэкапа или восстановления уже выполняется."
         return 1
     fi
 
@@ -737,7 +766,7 @@ do_backup() {
     fi
 
     ui_spin_start "Создаю и сжимаю дамп ${DB_NAME}..."
-    if ! ( set -o pipefail; docker exec "$DOCKER_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" 2>"$err_log" | gzip -6 > "$archive_file" ) \
+    if ! ( set -o pipefail; docker exec "$DOCKER_CONTAINER" pg_dump --clean --if-exists -U "$DB_USER" "$DB_NAME" 2>"$err_log" | gzip -6 > "$archive_file" ) \
        || [[ ! -s "$archive_file" ]] \
        || ! gzip -t "$archive_file" 2>/dev/null; then
         local err_text
@@ -777,10 +806,18 @@ do_backup() {
         fi
     fi
 
+    local retain="${LOCAL_RETAIN_DAYS:-7}"
+    [[ "$retain" =~ ^[0-9]+$ ]] || retain=7
+
     if [[ "$send_ok" == "true" ]]; then
-        rm -f "$archive_file"
         echo "$(date '+%d.%m.%Y %H:%M')|${archive_size}|ok" > "$LAST_BACKUP_FILE"
-        print_message "SUCCESS" "Бэкап успешно отправлен в Telegram, временный файл удалён."
+        if (( retain == 0 )); then
+            rm -f "$archive_file"
+            print_message "SUCCESS" "Бэкап отправлен в Telegram, локальный файл удалён."
+        else
+            print_message "SUCCESS" "Бэкап отправлен в Telegram и сохранён локально (${retain} дн.)."
+            cleanup_old_backups
+        fi
         _release_run_lock
         return 0
     else
@@ -792,11 +829,190 @@ do_backup() {
     fi
 }
 
+# ============== ВОССТАНОВЛЕНИЕ ИЗ БЭКАПА ==============
+restore_backup() {
+    LOG_CATEGORY="restore"
+    if ! _take_run_lock; then
+        print_message "WARN" "Сейчас выполняется другая операция (бэкап или восстановление)."
+        return 1
+    fi
+
+    clear
+    echo -e "${GREEN}${BOLD}Восстановление PostgreSQL из бэкапа${RESET}"
+    echo ""
+    print_message "INFO" "Целевой контейнер: ${BOLD}${DOCKER_CONTAINER}${RESET} (${DB_USER}/${DB_NAME})"
+    print_message "INFO" "Папка локальных копий: ${BOLD}${BACKUP_DIR}${RESET}"
+    echo ""
+
+    if ! docker container inspect -f '{{.State.Running}}' "$DOCKER_CONTAINER" 2>/dev/null | grep -q "true"; then
+        print_message "ERROR" "Контейнер ${BOLD}${DOCKER_CONTAINER}${RESET} не запущен!"
+        _release_run_lock
+        return 1
+    fi
+
+    local -a files=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && files+=("$f")
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -type f \( -name "*.sql.gz" -o -name "*.sql" \) -printf "%T@ %p\n" 2>/dev/null | sort -nr | cut -d' ' -f2-)
+
+    ui_menu_reset
+    local i=1 f size
+    for f in "${files[@]}"; do
+        size=$(du -h "$f" | cut -f1)
+        ui_menu_add "$i" "${f##*/} ${LIGHT_GRAY}(${size})${RESET}"
+        i=$((i + 1))
+    done
+    [[ ${#files[@]} -gt 0 ]] && ui_menu_gap
+    ui_menu_add "P" "Указать путь к файлу вручную (.sql или .sql.gz)" primary
+    ui_menu_gap
+    ui_menu_add "0" "Назад"
+
+    local choice selected_file=""
+    ui_menu_choose choice
+    echo ""
+
+    case "$choice" in
+        0)
+            _release_run_lock
+            return 0
+            ;;
+        [Pp])
+            ui_input selected_file "Полный путь к файлу дампа" "/tmp/backup.sql.gz" "Поддерживаются .sql.gz и .sql"
+            if [[ -z "$selected_file" || ! -f "$selected_file" ]]; then
+                print_message "ERROR" "Файл не найден: ${selected_file:-пусто}"
+                _release_run_lock
+                return 1
+            fi
+            ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+                selected_file="${files[$((choice - 1))]}"
+            else
+                print_message "ERROR" "Неверный выбор."
+                _release_run_lock
+                return 1
+            fi
+            ;;
+    esac
+
+    if [[ "$selected_file" == *.gz ]] && ! gzip -t "$selected_file" 2>/dev/null; then
+        print_message "ERROR" "Архив повреждён или не является корректным gzip-файлом."
+        _release_run_lock
+        return 1
+    fi
+
+    echo ""
+    print_message "WARN" "Файл: ${BOLD}${selected_file}${RESET}"
+    print_message "WARN" "Текущие данные в базе ${BOLD}${DB_NAME}${RESET} будут перезаписаны!"
+    local confirm
+    ui_confirm confirm "Выполнить восстановление?"
+    echo ""
+
+    if [[ "$confirm" != "y" ]]; then
+        print_message "INFO" "Восстановление отменено."
+        _release_run_lock
+        return 0
+    fi
+
+    local err_log rc=0
+    err_log=$(mktemp)
+    ui_spin_start "Восстанавливаю базу ${DB_NAME}..."
+
+    if [[ "$selected_file" == *.gz ]]; then
+        ( set -o pipefail; gunzip -c "$selected_file" | docker exec -i "$DOCKER_CONTAINER" psql -q -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>"$err_log" ) || rc=$?
+    else
+        docker exec -i "$DOCKER_CONTAINER" psql -q -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>"$err_log" < "$selected_file" || rc=$?
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        print_message "SUCCESS" "База ${BOLD}${DB_NAME}${RESET} успешно восстановлена!"
+        if [[ -s "$err_log" ]]; then
+            print_message "WARN" "Предупреждения psql (первые 5 строк):"
+            head -n 5 "$err_log"
+        fi
+        send_telegram_message "✅ <b>Восстановление БД ${DB_NAME} завершено</b>\nФайл: <code>${selected_file##*/}</code>" || true
+    else
+        print_message "ERROR" "Ошибка при восстановлении (код ${rc}):"
+        head -n 10 "$err_log"
+        log_write "ERROR" "Restore failed (rc=${rc}): $(head -n 5 "$err_log" | tr '\n' ' ')"
+    fi
+
+    rm -f "$err_log"
+    _release_run_lock
+    return $rc
+}
+
+# ============== ОБНОВЛЕНИЕ СКРИПТА ==============
+_version_lt() {
+    [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
+
+update_script() {
+    LOG_CATEGORY="system"
+    clear
+    echo -e "${GREEN}${BOLD}Обновление скрипта${RESET}"
+    echo ""
+
+    if [[ "$EUID" -ne 0 ]]; then
+        print_message "ERROR" "Для обновления требуются права root."
+        return 1
+    fi
+
+    ui_spin_start "Проверяю последнюю версию на GitHub..."
+    local remote_ver
+    remote_ver=$(curl -fsSL --max-time 15 "$SCRIPT_REPO_URL" 2>/dev/null | grep -m 1 '^VERSION=' | cut -d'"' -f2)
+
+    if [[ -z "$remote_ver" ]]; then
+        print_message "ERROR" "Не удалось получить информацию о версии с GitHub."
+        return 1
+    fi
+
+    print_message "INFO" "Текущая версия:   ${BOLD}${VERSION}${RESET}"
+    print_message "INFO" "Версия на GitHub: ${BOLD}${GREEN}${remote_ver}${RESET}"
+    echo ""
+
+    local confirm="n"
+    if _version_lt "$VERSION" "$remote_ver"; then
+        ui_confirm confirm "Доступно обновление до v${remote_ver}. Установить?"
+    else
+        print_message "SUCCESS" "У вас установлена актуальная версия."
+        ui_confirm confirm "Принудительно переустановить с GitHub?"
+    fi
+
+    [[ "$confirm" != "y" ]] && { print_message "INFO" "Обновление отменено."; return 0; }
+
+    local tmp_script="${SCRIPT_PATH}.tmp"
+    ui_spin_start "Загружаю новую версию..."
+    if ! curl -fsSL --max-time 30 "$SCRIPT_REPO_URL" -o "$tmp_script"; then
+        rm -f "$tmp_script"
+        print_message "ERROR" "Ошибка загрузки файла с GitHub."
+        return 1
+    fi
+
+    if [[ ! -s "$tmp_script" ]] || ! head -n 1 "$tmp_script" | grep -qE '^#!.*bash'; then
+        rm -f "$tmp_script"
+        print_message "ERROR" "Загруженный файл повреждён или не является bash-скриптом."
+        return 1
+    fi
+
+    cp -f "$SCRIPT_PATH" "${SCRIPT_PATH}.bak" 2>/dev/null || true
+    mv -f "$tmp_script" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    setup_symlink
+
+    print_message "SUCCESS" "Скрипт обновлён до v${remote_ver}! Конфигурация сохранена."
+    echo ""
+    if _ui_interactive; then
+        read -rp "Нажмите Enter для перезапуска..."
+        exec "$SCRIPT_PATH"
+    fi
+}
+
 # ============== КАРТОЧКА СТАТУСА ==============
 show_status_card() {
-    local title="${GREEN}${BOLD}PostgreSQL Backup to Telegram${RESET}"
+    local title="${GREEN}${BOLD}PostgreSQL Backup${RESET}  ${LIGHT_GRAY}v${VERSION}${RESET}"
     local db_val="${BOLD}${DOCKER_CONTAINER}${RESET} · ${DB_USER}/${DB_NAME}"
-    local tg_val sched_val next_val last_val
+    local tg_val sched_val next_val retain_val last_val local_count
 
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local tail="${TELEGRAM_BOT_TOKEN#*:}"
@@ -828,6 +1044,13 @@ show_status_card() {
         next_val="${LIGHT_GRAY}—${RESET}"
     fi
 
+    local_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sql.gz" 2>/dev/null | wc -l)
+    if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
+        retain_val="${LIGHT_GRAY}Удалять сразу${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
+    else
+        retain_val="${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
+    fi
+
     if [[ -f "$LAST_BACKUP_FILE" ]]; then
         local lb_date lb_size lb_st
         IFS='|' read -r lb_date lb_size lb_st < "$LAST_BACKUP_FILE"
@@ -845,6 +1068,7 @@ show_status_card() {
         "Telegram"     "$tg_val" \
         "Расписание"   "$sched_val" \
         "След. запуск" "$next_val" \
+        "Хранение"     "$retain_val" \
         "Последний"    "$last_val"
 }
 
@@ -853,14 +1077,19 @@ menu_schedule() {
     local choice
     while true; do
         clear
-        echo -e "${GREEN}${BOLD}Настройка расписания (systemd.timer)${RESET}"
+        echo -e "${GREEN}${BOLD}Расписание и хранение копий${RESET}"
         echo ""
         if [[ "$SCHEDULE_MODE" == "interval" ]]; then
-            print_message "INFO" "Текущий режим: ${BOLD}интервал каждые ${SCHEDULE_HOURS} ч.${RESET}"
+            print_message "INFO" "Расписание: ${BOLD}интервал каждые ${SCHEDULE_HOURS} ч.${RESET}"
         elif [[ "$SCHEDULE_MODE" == "time" ]]; then
-            print_message "INFO" "Текущий режим: ${BOLD}по времени (${SCHEDULE_TIMES})${RESET}"
+            print_message "INFO" "Расписание: ${BOLD}по времени (${SCHEDULE_TIMES})${RESET}"
         else
-            print_message "INFO" "Текущий режим: ${YELLOW}отключено${RESET}"
+            print_message "INFO" "Расписание: ${YELLOW}отключено${RESET}"
+        fi
+        if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
+            print_message "INFO" "Хранение на сервере: ${YELLOW}удалять сразу после отправки в Telegram${RESET}"
+        else
+            print_message "INFO" "Хранение на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} (${BACKUP_DIR})"
         fi
         echo ""
 
@@ -873,6 +1102,8 @@ menu_schedule() {
             ui_menu_add 3 "Возобновить расписание" primary
         fi
         ui_menu_add 4 "Полностью отключить расписание" danger
+        ui_menu_gap
+        ui_menu_add 5 "Изменить срок хранения на сервере (дней)"
         ui_menu_gap
         ui_menu_add 0 "Назад"
         ui_menu_choose choice
@@ -921,6 +1152,21 @@ menu_schedule() {
                 save_config
                 apply_systemd_schedule
                 print_message "SUCCESS" "Расписание отключено."
+                ;;
+            5)
+                local days
+                ui_input days "Сколько дней хранить локальные копии" "$LOCAL_RETAIN_DAYS" "0 — удалять сразу после отправки в Telegram"
+                if [[ "$days" =~ ^[0-9]+$ ]]; then
+                    LOCAL_RETAIN_DAYS="$((10#$days))"
+                    save_config
+                    if (( LOCAL_RETAIN_DAYS == 0 )); then
+                        print_message "SUCCESS" "Локальное хранение отключено (архивы будут удаляться после отправки)."
+                    else
+                        print_message "SUCCESS" "Срок хранения на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET}"
+                    fi
+                else
+                    print_message "ERROR" "Введите целое число (0 или больше)."
+                fi
                 ;;
             0) return ;;
         esac
@@ -1054,8 +1300,9 @@ menu_logs() {
         echo ""
         ui_menu_reset
         ui_menu_add 1 "Лог бэкапов (backup.log)"
-        ui_menu_add 2 "Лог ошибок (error.log)"
-        ui_menu_add 3 "Журнал systemd (journalctl)"
+        ui_menu_add 2 "Лог восстановлений (restore.log)"
+        ui_menu_add 3 "Лог ошибок (error.log)"
+        ui_menu_add 4 "Журнал systemd (journalctl)"
         ui_menu_gap
         ui_menu_add 0 "Назад"
         ui_menu_choose choice
@@ -1065,21 +1312,17 @@ menu_logs() {
         case "$choice" in
             1)
                 echo -e "${GREEN}${BOLD}${LOG_DIR}/backup.log${RESET}\n"
-                if [[ -s "${LOG_DIR}/backup.log" ]]; then
-                    tail -n 50 "${LOG_DIR}/backup.log"
-                else
-                    print_message "INFO" "Лог пока пуст."
-                fi
+                if [[ -s "${LOG_DIR}/backup.log" ]]; then tail -n 50 "${LOG_DIR}/backup.log"; else print_message "INFO" "Лог пока пуст."; fi
                 ;;
             2)
-                echo -e "${GREEN}${BOLD}${LOG_DIR}/error.log${RESET}\n"
-                if [[ -s "${LOG_DIR}/error.log" ]]; then
-                    tail -n 50 "${LOG_DIR}/error.log"
-                else
-                    print_message "INFO" "Ошибок не зафиксировано."
-                fi
+                echo -e "${GREEN}${BOLD}${LOG_DIR}/restore.log${RESET}\n"
+                if [[ -s "${LOG_DIR}/restore.log" ]]; then tail -n 50 "${LOG_DIR}/restore.log"; else print_message "INFO" "Лог пока пуст."; fi
                 ;;
             3)
+                echo -e "${GREEN}${BOLD}${LOG_DIR}/error.log${RESET}\n"
+                if [[ -s "${LOG_DIR}/error.log" ]]; then tail -n 50 "${LOG_DIR}/error.log"; else print_message "INFO" "Ошибок не зафиксировано."; fi
+                ;;
+            4)
                 echo -e "${GREEN}${BOLD}journalctl -u ${SERVICE_NAME}.service${RESET}\n"
                 journalctl -u "${SERVICE_NAME}.service" -n 40 --no-pager 2>/dev/null || print_message "INFO" "Записей нет."
                 ;;
@@ -1117,35 +1360,39 @@ main_menu() {
 
         ui_menu_reset
         ui_menu_add 1 "Сделать моментальный бэкап" primary
+        ui_menu_add 2 "Восстановить БД из бэкапа" primary
         if is_timer_active; then
-            ui_menu_add 2 "Приостановить авто-бэкапы" warn
+            ui_menu_add 3 "Приостановить авто-бэкапы" warn
         else
-            ui_menu_add 2 "Возобновить авто-бэкапы" primary
+            ui_menu_add 3 "Возобновить авто-бэкапы" primary
         fi
         ui_menu_gap
-        ui_menu_add 3 "Расписание (интервал в часах / точное время)"
-        ui_menu_add 4 "База данных и Docker-контейнер"
-        ui_menu_add 5 "Настройки Telegram (токен и чат)"
-        ui_menu_add 6 "Логи"
+        ui_menu_add 4 "Расписание и хранение (время / интервал / дни)"
+        ui_menu_add 5 "База данных и Docker-контейнер"
+        ui_menu_add 6 "Настройки Telegram (токен и чат)"
+        ui_menu_add 7 "Логи"
         ui_menu_gap
-        ui_menu_add 7 "Удалить скрипт и таймер" danger
+        ui_menu_add 8 "Обновить скрипт" warn
+        ui_menu_add 9 "Удалить скрипт и таймер" danger
         ui_menu_gap
         ui_menu_add 0 "Выход"
-        ui_menu_footer "Команда быстрого вызова: pg-backup [backup|pause|resume|status]"
+        ui_menu_footer "Команды: pg-backup [backup|restore|update|pause|resume|status]"
         ui_menu_choose choice "$choice"
         echo ""
 
         case "$choice" in
             1) ( do_backup ) || true; echo ""; read -rp "Нажмите Enter..." ;;
-            2)
+            2) ( restore_backup ) || true; echo ""; read -rp "Нажмите Enter..." ;;
+            3)
                 if is_timer_active; then pause_schedule; else resume_schedule; fi
                 echo ""; read -rp "Нажмите Enter..."
                 ;;
-            3) menu_schedule ;;
-            4) menu_database ;;
-            5) menu_telegram ;;
-            6) menu_logs ;;
-            7) uninstall_all ;;
+            4) menu_schedule ;;
+            5) menu_database ;;
+            6) menu_telegram ;;
+            7) menu_logs ;;
+            8) update_script; echo ""; read -rp "Нажмите Enter..." ;;
+            9) uninstall_all ;;
             0) exit 0 ;;
         esac
     done
@@ -1161,6 +1408,12 @@ case "${1:-}" in
     backup)
         do_backup
         ;;
+    restore)
+        restore_backup
+        ;;
+    update)
+        update_script
+        ;;
     pause)
         pause_schedule
         ;;
@@ -1174,7 +1427,7 @@ case "${1:-}" in
         uninstall_all
         ;;
     *)
-        echo "Использование: pg-backup [backup|pause|resume|status|uninstall]"
+        echo "Использование: pg-backup [backup|restore|update|pause|resume|status|uninstall]"
         exit 1
         ;;
 esac
