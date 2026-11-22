@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.3.1"
+VERSION="1.4.0"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -445,6 +445,18 @@ _disk_usage() {
     df -B1 --output=used,avail,size "$dir" 2>/dev/null | awk 'NR==2 {print $1, $2, $3}'
 }
 
+_disk_usage_tg_line() {
+    local du_out d_used d_avail d_total d_pct icon="💿"
+    du_out=$(_disk_usage)
+    [[ -z "$du_out" ]] && return 0
+    read -r d_used d_avail d_total <<< "$du_out"
+    [[ -n "$d_total" && "$d_total" -gt 0 ]] || return 0
+    d_pct=$(( d_used * 100 / d_total ))
+    (( d_pct >= 90 )) && icon="⚠️"
+    printf '\\n%s Диск: %s / %s (%d%%) · свободно %s' \
+        "$icon" "$(_ui_human_size "$d_used")" "$(_ui_human_size "$d_total")" "$d_pct" "$(_ui_human_size "$d_avail")"
+}
+
 _ui_status_card() {
     local LC_ALL=C.UTF-8
     local title="$1"; shift
@@ -769,7 +781,7 @@ do_backup() {
         return 1
     fi
 
-    local timestamp archive_file err_log archive_size file_size_bytes send_ok=true
+    local timestamp archive_file err_log archive_size file_size_bytes disk_line send_ok=true
     timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     archive_file="${BACKUP_DIR}/${DB_NAME}_${timestamp}.sql.gz"
     err_log=$(mktemp)
@@ -800,6 +812,7 @@ do_backup() {
 
     archive_size=$(du -h "$archive_file" | cut -f1)
     file_size_bytes=$(stat -c%s "$archive_file")
+    disk_line=$(_disk_usage_tg_line)
     print_message "SUCCESS" "Архив создан и проверен (${archive_size})"
 
     if (( file_size_bytes > 52428800 )); then
@@ -809,7 +822,7 @@ do_backup() {
         local total_parts=${#parts[@]} part_num=1 part
 
         for part in "${parts[@]}"; do
-            if ! send_telegram_file "$part" "📦 Бэкап <b>${DB_NAME}</b> (часть ${part_num}/${total_parts})\n📅 ${timestamp}\n💾 ${archive_size}"; then
+            if ! send_telegram_file "$part" "📦 Бэкап <b>${DB_NAME}</b> (часть ${part_num}/${total_parts})\n📅 ${timestamp}\n💾 ${archive_size}${disk_line}"; then
                 send_ok=false
                 break
             fi
@@ -819,7 +832,7 @@ do_backup() {
         rm -f "${archive_file}".part_*
     else
         ui_spin_start "Отправляю архив в Telegram..."
-        if ! send_telegram_file "$archive_file" "✅ Бэкап <b>${DB_NAME}</b>\n🐳 <code>${DOCKER_CONTAINER}</code>\n📅 ${timestamp}\n💾 ${archive_size}"; then
+        if ! send_telegram_file "$archive_file" "✅ Бэкап <b>${DB_NAME}</b>\n🐳 <code>${DOCKER_CONTAINER}</code>\n📅 ${timestamp}\n💾 ${archive_size}${disk_line}"; then
             send_ok=false
         fi
     fi
@@ -841,7 +854,7 @@ do_backup() {
     else
         echo "$(date '+%d.%m.%Y %H:%M')|${archive_size}|tg_err" > "$LAST_BACKUP_FILE"
         print_message "ERROR" "Не удалось отправить в Telegram. Архив сохранён локально: ${archive_file}"
-        send_telegram_message "❌ <b>Ошибка отправки файла ${DB_NAME}</b>\nАрхив оставлен на сервере." || true
+        send_telegram_message "❌ <b>Ошибка отправки файла ${DB_NAME}</b>\nАрхив оставлен на сервере.${disk_line}" || true
         _release_run_lock
         return 1
     fi
