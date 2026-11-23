@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.4.2"
+VERSION="1.4.3"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -1088,6 +1088,9 @@ show_status_card() {
 
     if is_timer_active; then
         next_val=$(systemctl show -p NextElapseUSecRealtime --value "${SERVICE_NAME}.timer" 2>/dev/null)
+        if [[ -z "$next_val" || "$next_val" == "n/a" ]]; then
+            next_val=$(systemctl list-timers --no-pager --no-legend "${SERVICE_NAME}.timer" 2>/dev/null | awk '$1 != "n/a" && $1 != "-" {print $1, $2, $3, $4}')
+        fi
         next_val="${BOLD}${next_val:-вычисляется...}${RESET}"
     else
         next_val="${LIGHT_GRAY}—${RESET}"
