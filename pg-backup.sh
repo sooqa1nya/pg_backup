@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.4.3"
+VERSION="1.4.4"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -679,8 +679,16 @@ EOF
 
     local timer_rules=""
     if [[ "$SCHEDULE_MODE" == "interval" ]]; then
-        timer_rules="OnActiveSec=${SCHEDULE_HOURS}h
+        if (( SCHEDULE_HOURS == 24 )); then
+            timer_rules="OnCalendar=*-*-* 00:00:00
+Persistent=true"
+        elif (( SCHEDULE_HOURS >= 1 && SCHEDULE_HOURS < 24 )); then
+            timer_rules="OnCalendar=*-*-* 00/${SCHEDULE_HOURS}:00:00
+Persistent=true"
+        else
+            timer_rules="OnActiveSec=${SCHEDULE_HOURS}h
 OnUnitActiveSec=${SCHEDULE_HOURS}h"
+        fi
     else
         local t
         for t in $SCHEDULE_TIMES; do
@@ -704,7 +712,8 @@ EOF
     if [[ "$SCHEDULE_PAUSED" == "true" ]]; then
         systemctl disable --now "${SERVICE_NAME}.timer" 2>/dev/null || true
     else
-        systemctl enable --now "${SERVICE_NAME}.timer" 2>/dev/null
+        systemctl enable "${SERVICE_NAME}.timer" 2>/dev/null || true
+        systemctl restart "${SERVICE_NAME}.timer" 2>/dev/null
     fi
 }
 
