@@ -4,7 +4,7 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 SCRIPT_REPO_URL="https://raw.githubusercontent.com/sooqa1nya/pg_backup/master/pg-backup.sh"
 
 INSTALL_DIR="/opt/pg-backup-tg"
@@ -457,6 +457,23 @@ _disk_usage_tg_line() {
         "$icon" "$(_ui_human_size "$d_used")" "$(_ui_human_size "$d_total")" "$d_pct" "$(_ui_human_size "$d_avail")"
 }
 
+_backup_dir_size() {
+    [[ -d "$BACKUP_DIR" ]] || { echo 0; return 0; }
+    find "$BACKUP_DIR" -type f -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
+
+_backup_dir_count() {
+    [[ -d "$BACKUP_DIR" ]] || { echo 0; return 0; }
+    find "$BACKUP_DIR" -maxdepth 1 -type f \( -name "*.sql.gz" -o -name "*.sql" \) 2>/dev/null | wc -l
+}
+
+_backup_dir_tg_line() {
+    local b_size b_count
+    b_size=$(_ui_human_size "$(_backup_dir_size)")
+    b_count=$(_backup_dir_count)
+    printf '\\n📁 %s (файлов: %d)' "$b_size" "$b_count"
+}
+
 _ui_status_card() {
     local LC_ALL=C.UTF-8
     local title="$1"; shift
@@ -781,7 +798,7 @@ do_backup() {
         return 1
     fi
 
-    local timestamp archive_file err_log archive_size file_size_bytes disk_line send_ok=true
+    local timestamp archive_file err_log archive_size file_size_bytes backups_line disk_line send_ok=true
     timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     archive_file="${BACKUP_DIR}/${DB_NAME}_${timestamp}.sql.gz"
     err_log=$(mktemp)
@@ -812,6 +829,7 @@ do_backup() {
 
     archive_size=$(du -h "$archive_file" | cut -f1)
     file_size_bytes=$(stat -c%s "$archive_file")
+    backups_line=$(_backup_dir_tg_line)
     disk_line=$(_disk_usage_tg_line)
     print_message "SUCCESS" "Архив создан и проверен (${archive_size})"
 
@@ -822,7 +840,7 @@ do_backup() {
         local total_parts=${#parts[@]} part_num=1 part
 
         for part in "${parts[@]}"; do
-            if ! send_telegram_file "$part" "📦 Бэкап <b>${DB_NAME}</b> (часть ${part_num}/${total_parts})\n📅 ${timestamp}\n💾 ${archive_size}${disk_line}"; then
+            if ! send_telegram_file "$part" "📦 Бэкап <b>${DB_NAME}</b> (часть ${part_num}/${total_parts})\n📅 ${timestamp}\n💾 ${archive_size}${backups_line}${disk_line}"; then
                 send_ok=false
                 break
             fi
@@ -832,7 +850,7 @@ do_backup() {
         rm -f "${archive_file}".part_*
     else
         ui_spin_start "Отправляю архив в Telegram..."
-        if ! send_telegram_file "$archive_file" "✅ Бэкап <b>${DB_NAME}</b>\n🐳 <code>${DOCKER_CONTAINER}</code>\n📅 ${timestamp}\n💾 ${archive_size}${disk_line}"; then
+        if ! send_telegram_file "$archive_file" "✅ Бэкап <b>${DB_NAME}</b>\n🐳 <code>${DOCKER_CONTAINER}</code>\n📅 ${timestamp}\n💾 ${archive_size}${backups_line}${disk_line}"; then
             send_ok=false
         fi
     fi
@@ -854,7 +872,7 @@ do_backup() {
     else
         echo "$(date '+%d.%m.%Y %H:%M')|${archive_size}|tg_err" > "$LAST_BACKUP_FILE"
         print_message "ERROR" "Не удалось отправить в Telegram. Архив сохранён локально: ${archive_file}"
-        send_telegram_message "❌ <b>Ошибка отправки файла ${DB_NAME}</b>\nАрхив оставлен на сервере.${disk_line}" || true
+        send_telegram_message "❌ <b>Ошибка отправки файла ${DB_NAME}</b>\nАрхив оставлен на сервере.${backups_line}${disk_line}" || true
         _release_run_lock
         return 1
     fi
@@ -1043,7 +1061,7 @@ update_script() {
 show_status_card() {
     local title="${GREEN}${BOLD}PostgreSQL Backup${RESET}  ${LIGHT_GRAY}v${VERSION}${RESET}"
     local db_val="${BOLD}${DOCKER_CONTAINER}${RESET} · ${DB_USER}/${DB_NAME}"
-    local tg_val sched_val next_val retain_val disk_val last_val local_count
+    local tg_val sched_val next_val retain_val disk_val last_val local_count local_size
 
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         local tail="${TELEGRAM_BOT_TOKEN#*:}"
@@ -1075,11 +1093,12 @@ show_status_card() {
         next_val="${LIGHT_GRAY}—${RESET}"
     fi
 
-    local_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*.sql.gz" 2>/dev/null | wc -l)
+    local_count=$(_backup_dir_count)
+    local_size=$(_ui_human_size "$(_backup_dir_size)")
     if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
-        retain_val="${LIGHT_GRAY}Удалять сразу${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
+        retain_val="${LIGHT_GRAY}Удалять сразу${RESET} ${LIGHT_GRAY}(файлов: ${local_count} · ${local_size})${RESET}"
     else
-        retain_val="${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} ${LIGHT_GRAY}(файлов: ${local_count})${RESET}"
+        retain_val="${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} ${LIGHT_GRAY}(файлов: ${local_count} · ${local_size})${RESET}"
     fi
 
     disk_val="${LIGHT_GRAY}—${RESET}"
@@ -1136,10 +1155,12 @@ menu_schedule() {
         else
             print_message "INFO" "Расписание: ${YELLOW}отключено${RESET}"
         fi
+        local local_size
+        local_size=$(_ui_human_size "$(_backup_dir_size)")
         if [[ "${LOCAL_RETAIN_DAYS:-7}" == "0" ]]; then
-            print_message "INFO" "Хранение на сервере: ${YELLOW}удалять сразу после отправки в Telegram${RESET}"
+            print_message "INFO" "Хранение на сервере: ${YELLOW}удалять сразу после отправки в Telegram${RESET} (${local_size})"
         else
-            print_message "INFO" "Хранение на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} (${BACKUP_DIR})"
+            print_message "INFO" "Хранение на сервере: ${BOLD}${LOCAL_RETAIN_DAYS} дн.${RESET} (${BACKUP_DIR}, ${local_size})"
         fi
         echo ""
 
